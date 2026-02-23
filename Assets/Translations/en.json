@@ -1894,7 +1894,8 @@
       "crop": "Crop (Fill)",
       "fit": "Fit (Contain)",
       "repeat": "Repeat (Tile)",
-      "stretch": "Stretch"
+      "stretch": "Stretch",
+      "scrolling": "Scrolling (Parallax)"
     },
     "no-match": "No match found.",
     "no-wallpaper": "No wallpaper found.",

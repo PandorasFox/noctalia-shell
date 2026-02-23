@@ -29,6 +29,10 @@ layout(std140, binding = 0) uniform buf {
     float isSolid2;      // 1.0 if source2 is solid color, 0.0 otherwise
     vec4 solidColor1;    // Solid color for source1
     vec4 solidColor2;    // Solid color for source2
+
+    // Scrolling parallax mode
+    float scrollU;       // Horizontal scroll position (0-100)
+    float scrollV;       // Vertical scroll position (0-100)
 } ubuf;
 
 // Calculate UV coordinates based on fill mode
@@ -69,10 +73,18 @@ vec2 calculateUV(vec2 uv, float imgWidth, float imgHeight) {
         // Mode 3: stretch - Use original UV (stretches to fit)
         // No transformation needed for stretch mode
     }
-    else {
+    else if (ubuf.fillMode < 4.5) {
         // Mode 4: repeat (tile) - Tile image at original size
         vec2 screenPixel = uv * vec2(ubuf.screenWidth, ubuf.screenHeight);
         transformedUV = screenPixel / vec2(imgWidth, imgHeight);
+    }
+    else {
+        // Mode 5: Scrolling parallax - crop with UV offset
+        float scale = max(ubuf.screenWidth / imgWidth, ubuf.screenHeight / imgHeight);
+        vec2 scaledSize = vec2(imgWidth, imgHeight) * scale;
+        vec2 excess = (scaledSize - vec2(ubuf.screenWidth, ubuf.screenHeight)) / scaledSize;
+        vec2 scrollOffset = vec2(ubuf.scrollU, ubuf.scrollV) / 100.0;
+        transformedUV = uv * (vec2(1.0) - excess) + excess * scrollOffset;
     }
 
     return transformedUV;
@@ -89,7 +101,7 @@ vec4 sampleWithFillMode(sampler2D tex, vec2 uv, float imgWidth, float imgHeight,
     vec2 transformedUV = calculateUV(uv, imgWidth, imgHeight);
 
     // Mode 4 (repeat): use fract() to tile the image
-    if (ubuf.fillMode > 3.5) {
+    if (ubuf.fillMode > 3.5 && ubuf.fillMode < 4.5) {
         return texture(tex, fract(transformedUV));
     }
 

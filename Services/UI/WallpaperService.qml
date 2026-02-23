@@ -41,6 +41,27 @@ Singleton {
   readonly property string noctaliaDefaultWallpaper: Quickshell.shellDir + "/Assets/Wallpaper/noctalia.png"
   property string defaultWallpaper: noctaliaDefaultWallpaper
 
+  // Scroll position storage for parallax mode (per-monitor)
+  property var monitorScrollPositions: ({})
+
+  function setScrollPosition(screenName, x, y) {
+    var pos = monitorScrollPositions;
+    pos[screenName] = { "x": x, "y": y };
+    monitorScrollPositions = pos;
+  }
+
+  function getScrollPosition(screenName) {
+    var pos = monitorScrollPositions[screenName];
+    if (pos !== undefined) {
+      return pos;
+    }
+    return { "x": 50, "y": 50 };
+  }
+
+  function clearScrollPositions() {
+    monitorScrollPositions = {};
+  }
+
   // Signals for reactive UI updates
   signal wallpaperChanged(string screenName, string path)
   // Emitted when a wallpaper changes
@@ -196,6 +217,11 @@ Singleton {
                            "key": "repeat",
                            "name": I18n.tr("wallpaper.fill-modes.repeat"),
                            "uniform": 4.0
+                         });
+    fillModeModel.append({
+                           "key": "scrolling",
+                           "name": I18n.tr("wallpaper.fill-modes.scrolling"),
+                           "uniform": 5.0
                          });
 
     // Populate transitionsModel with translated names

@@ -58,6 +58,12 @@ Variants {
       property real fillMode: WallpaperService.getFillModeUniform()
       property vector4d fillColor: Qt.vector4d(Settings.data.wallpaper.fillColor.r, Settings.data.wallpaper.fillColor.g, Settings.data.wallpaper.fillColor.b, 1.0)
 
+      // Parallax scrolling state
+      readonly property bool effectiveScrolling: fillMode > 4.5
+      property real scrollX: 50    // 0-100, current animated position
+      property real scrollY: 50    // 0-100, current animated position
+      property bool _firstScrollUpdate: true
+
       // Solid color mode - track whether current/next are solid colors
       property bool isSolid1: false
       property bool isSolid2: false
@@ -65,6 +71,178 @@ Variants {
       property color _solidColor2: Settings.data.wallpaper.solidColor
       property vector4d solidColor1: Qt.vector4d(_solidColor1.r, _solidColor1.g, _solidColor1.b, 1.0)
       property vector4d solidColor2: Qt.vector4d(_solidColor2.r, _solidColor2.g, _solidColor2.b, 1.0)
+
+      // Workspace monitoring for parallax scrolling
+      Connections {
+        target: CompositorService
+        enabled: root.effectiveScrolling
+        function onWorkspaceChanged() {
+          root._updateScrollTarget();
+        }
+      }
+
+      function _updateScrollTarget() {
+        if (!effectiveScrolling) return;
+
+        var workspaces = CompositorService.workspaces;
+        if (!workspaces || workspaces.count === 0) return;
+
+        // Collect workspaces on this monitor and find the active one.
+        // Use isActive (visible on output) instead of isFocused (global keyboard focus)
+        // so that cursor moving between monitors doesn't trigger scroll changes.
+        var activeIdx = -1;
+        var outputWorkspaces = [];
+
+        for (var i = 0; i < workspaces.count; i++) {
+          var ws = workspaces.get(i);
+          if (ws.output === modelData.name) {
+            if (ws.isActive) {
+              activeIdx = outputWorkspaces.length;
+            }
+            outputWorkspaces.push(ws);
+          }
+        }
+
+        if (activeIdx < 0 || outputWorkspaces.length <= 1) {
+          // No change — keep current target to avoid spurious animation
+          return;
+        }
+
+        var scrollPos = activeIdx / (outputWorkspaces.length - 1) * 100;
+
+        // Niri is vertical, all others are horizontal
+        var newTargetX = CompositorService.isNiri ? 50 : scrollPos;
+        var newTargetY = CompositorService.isNiri ? scrollPos : 50;
+
+        scrollAnim.startAnimation(newTargetX, newTargetY);
+      }
+
+      // Analytical damped harmonic oscillator spring (matches Niri's spring.rs / libadwaita)
+      QtObject {
+        id: scrollAnim
+
+        property real damping: CompositorService.isNiri ? 63.25 : 89.44
+        property real stiffness: CompositorService.isNiri ? 1000.0 : 2000.0
+        property real mass: 1.0
+
+        property real startX: 50
+        property real startY: 50
+        property real targetX: 50
+        property real targetY: 50
+        property real startTime: 0
+
+        // Analytical spring position at time t (seconds) from 'from' towards 'to'.
+        // Based on the damped harmonic oscillator closed-form solution.
+        function springPosition(t, from, to) {
+          if (t <= 0) return from;
+          var beta = damping / (2 * mass);
+          var omega0 = Math.sqrt(stiffness / mass);
+          var x0 = from - to;
+          var envelope = Math.exp(-beta * t);
+          if (Math.abs(x0 * envelope) < 0.01) return to;
+
+          if (Math.abs(beta - omega0) < 0.0001) {
+            // Critically damped
+            return to + envelope * (x0 + beta * x0 * t);
+          } else if (beta < omega0) {
+            // Underdamped
+            var omega1 = Math.sqrt(omega0 * omega0 - beta * beta);
+            return to + envelope * (x0 * Math.cos(omega1 * t) + (beta * x0 / omega1) * Math.sin(omega1 * t));
+          } else {
+            // Overdamped
+            var omega2 = Math.sqrt(beta * beta - omega0 * omega0);
+            var coshV = function(v) { return (Math.exp(v) + Math.exp(-v)) / 2; };
+            var sinhV = function(v) { return (Math.exp(v) - Math.exp(-v)) / 2; };
+            return to + envelope * (x0 * coshV(omega2 * t) + (beta * x0 / omega2) * sinhV(omega2 * t));
+          }
+        }
+
+        function startAnimation(newTargetX, newTargetY) {
+          var now = Date.now() / 1000.0;
+
+          // Compute current position from in-flight animation
+          var t = Math.max(0, scrollFrameAnim.currentTime - startTime);
+          var currentX = springPosition(t, startX, targetX);
+          var currentY = springPosition(t, startY, targetY);
+
+          // Skip if already at target
+          if (Math.abs(newTargetX - currentX) < 0.01 && Math.abs(newTargetY - currentY) < 0.01) {
+            if (root._firstScrollUpdate) root._firstScrollUpdate = false;
+            return;
+          }
+
+          // First update: snap directly, no animation
+          if (root._firstScrollUpdate) {
+            root._firstScrollUpdate = false;
+            root.scrollX = newTargetX;
+            root.scrollY = newTargetY;
+            startX = newTargetX;
+            startY = newTargetY;
+            targetX = newTargetX;
+            targetY = newTargetY;
+            WallpaperService.setScrollPosition(modelData.name, root.scrollX, root.scrollY);
+            return;
+          }
+
+          // Chain from current position
+          startX = currentX;
+          startY = currentY;
+          targetX = newTargetX;
+          targetY = newTargetY;
+          startTime = scrollFrameAnim.running ? scrollFrameAnim.currentTime : now;
+          if (!scrollFrameAnim.running) {
+            scrollFrameAnim.currentTime = now;
+            scrollFrameAnim.running = true;
+          }
+        }
+      }
+
+      // FrameAnimation for vsync-accurate frame deltas (not locked to 16ms Timer)
+      FrameAnimation {
+        id: scrollFrameAnim
+        running: false
+
+        property real currentTime: 0
+
+        onRunningChanged: {
+          if (running) {
+            currentTime = Date.now() / 1000.0;
+          } else {
+            WallpaperService.setScrollPosition(modelData.name, root.scrollX, root.scrollY);
+          }
+        }
+
+        onTriggered: {
+          currentTime += frameTime;
+
+          var t = currentTime - scrollAnim.startTime;
+          root.scrollX = scrollAnim.springPosition(t, scrollAnim.startX, scrollAnim.targetX);
+          root.scrollY = scrollAnim.springPosition(t, scrollAnim.startY, scrollAnim.targetY);
+
+          var settledX = Math.abs(scrollAnim.targetX - root.scrollX) < 0.01;
+          var settledY = Math.abs(scrollAnim.targetY - root.scrollY) < 0.01;
+
+          if (settledX && settledY) {
+            root.scrollX = scrollAnim.targetX;
+            root.scrollY = scrollAnim.targetY;
+            running = false;
+          }
+
+          WallpaperService.setScrollPosition(modelData.name, root.scrollX, root.scrollY);
+        }
+      }
+
+      // Reset scroll state when fill mode changes away from scrolling
+      onEffectiveScrollingChanged: {
+        if (effectiveScrolling) {
+          _firstScrollUpdate = true;
+          _updateScrollTarget();
+        } else {
+          scrollFrameAnim.running = false;
+          scrollX = 50;
+          scrollY = 50;
+        }
+      }
 
       Component.onCompleted: setWallpaperInitial()
 
@@ -201,7 +379,7 @@ Variants {
       Loader {
         id: shaderLoader
         anchors.fill: parent
-        active: true
+        active: !root.effectiveScrolling
 
         sourceComponent: {
           switch (transitionType) {
@@ -220,6 +398,23 @@ Variants {
           default:
             return fadeShaderComponent;
           }
+        }
+      }
+
+      // Parallax shader loader - active only in scrolling mode
+      Loader {
+        id: parallaxLoader
+        anchors.fill: parent
+        active: root.effectiveScrolling
+        sourceComponent: ShaderEffect {
+          property variant source: currentWallpaper
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
+          property real imageWidth: currentWallpaper.sourceSize.width
+          property real imageHeight: currentWallpaper.sourceSize.height
+          property real screenWidth: width
+          property real screenHeight: height
+          fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_parallax.frag.qsb")
         }
       }
 
@@ -248,6 +443,10 @@ Variants {
           property real isSolid2: root.isSolid2 ? 1.0 : 0.0
           property vector4d solidColor1: root.solidColor1
           property vector4d solidColor2: root.solidColor2
+
+          // Scrolling parallax
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
 
           fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_fade.frag.qsb")
         }
@@ -280,6 +479,10 @@ Variants {
           property real isSolid2: root.isSolid2 ? 1.0 : 0.0
           property vector4d solidColor1: root.solidColor1
           property vector4d solidColor2: root.solidColor2
+
+          // Scrolling parallax
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
 
           fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_wipe.frag.qsb")
         }
@@ -315,6 +518,10 @@ Variants {
           property vector4d solidColor1: root.solidColor1
           property vector4d solidColor2: root.solidColor2
 
+          // Scrolling parallax
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
+
           fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_disc.frag.qsb")
         }
       }
@@ -349,6 +556,10 @@ Variants {
           property vector4d solidColor1: root.solidColor1
           property vector4d solidColor2: root.solidColor2
 
+          // Scrolling parallax
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
+
           fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_stripes.frag.qsb")
         }
       }
@@ -379,6 +590,10 @@ Variants {
           property real isSolid2: root.isSolid2 ? 1.0 : 0.0
           property vector4d solidColor1: root.solidColor1
           property vector4d solidColor2: root.solidColor2
+
+          // Scrolling parallax
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
 
           fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_pixelate.frag.qsb")
         }
@@ -413,6 +628,10 @@ Variants {
           property real isSolid2: root.isSolid2 ? 1.0 : 0.0
           property vector4d solidColor1: root.solidColor1
           property vector4d solidColor2: root.solidColor2
+
+          // Scrolling parallax
+          property real scrollU: root.scrollX
+          property real scrollV: root.scrollY
 
           fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_honeycomb.frag.qsb")
         }
@@ -672,6 +891,12 @@ Variants {
       // ------------------------------------------------------
       // Main method that actually trigger the wallpaper change
       function changeWallpaper() {
+        // In scroll mode, skip transitions - apply immediately
+        if (effectiveScrolling) {
+          setWallpaperImmediate(futureWallpaper);
+          return;
+        }
+
         // Get the transitionType from the settings
         transitionType = Settings.data.wallpaper.transitionType;
 

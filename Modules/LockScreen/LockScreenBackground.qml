@@ -16,10 +16,15 @@ Item {
 
   required property var screen
 
-  // Request preprocessed wallpaper when lock screen becomes active or dimensions change
-  Component.onCompleted: {
+  // screen is null at Component.onCompleted, so use onScreenChanged to initialize
+  onScreenChanged: {
     if (screen) {
       Qt.callLater(requestCachedWallpaper);
+      if (_isScrollMode) {
+        var pos = WallpaperService.getScrollPosition(screen.name);
+        _lockScrollX = pos.x;
+        _lockScrollY = pos.y;
+      }
     }
   }
 
@@ -109,9 +114,16 @@ Item {
     color: Settings.data.wallpaper.useSolidColor ? Settings.data.wallpaper.solidColor : "#000000"
   }
 
+  // Whether we're in scrolling parallax mode
+  readonly property bool _isScrollMode: WallpaperService.getFillModeUniform() > 4.5
+
+  // Scroll position snapshot taken at lock time
+  property real _lockScrollX: 50
+  property real _lockScrollY: 50
+
   Image {
     id: lockBgImage
-    visible: source !== "" && Settings.data.wallpaper.enabled && !Settings.data.wallpaper.useSolidColor
+    visible: source !== "" && Settings.data.wallpaper.enabled && !Settings.data.wallpaper.useSolidColor && !root._isScrollMode
     anchors.fill: parent
     fillMode: Image.PreserveAspectCrop
     source: resolvedWallpaperPath
@@ -133,6 +145,52 @@ Item {
       anchors.fill: parent
       color: root.tintColor
       opacity: Settings.data.general.lockScreenTint
+    }
+  }
+
+  // Parallax shader for scrolling mode on lock screen
+  Loader {
+    id: lockParallaxLoader
+    anchors.fill: parent
+    active: root._isScrollMode && resolvedWallpaperPath !== "" && Settings.data.wallpaper.enabled && !Settings.data.wallpaper.useSolidColor
+
+    sourceComponent: Item {
+      // Hidden image as texture source
+      Image {
+        id: lockParallaxSource
+        visible: false
+        source: resolvedWallpaperPath
+        cache: false
+        smooth: true
+        mipmap: false
+      }
+
+      ShaderEffect {
+        anchors.fill: parent
+        property variant source: lockParallaxSource
+        property real scrollU: root._lockScrollX
+        property real scrollV: root._lockScrollY
+        property real imageWidth: lockParallaxSource.sourceSize.width
+        property real imageHeight: lockParallaxSource.sourceSize.height
+        property real screenWidth: width
+        property real screenHeight: height
+        fragmentShader: Qt.resolvedUrl(Quickshell.shellDir + "/Shaders/qsb/wp_parallax.frag.qsb")
+
+        layer.enabled: true
+        layer.smooth: false
+        layer.effect: MultiEffect {
+          blurEnabled: !PowerProfileService.noctaliaPerformanceMode && (Settings.data.general.lockScreenBlur > 0)
+          blur: Settings.data.general.lockScreenBlur
+          blurMax: 48
+        }
+      }
+
+      // Tint overlay
+      Rectangle {
+        anchors.fill: parent
+        color: root.tintColor
+        opacity: Settings.data.general.lockScreenTint
+      }
     }
   }
 
